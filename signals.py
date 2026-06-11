@@ -391,23 +391,27 @@ def scan_forex():
 # ---------- Общее сканирование: крипта + валюта, одна лучшая ----------
 
 def scan_best():
-    """Сканирует крипту и валюту параллельно.
+    """Сканирует крипту, валюту и OTC параллельно.
     Возвращает (лучший_прошедший_порог, лучший_кандидат_вообще).
     Сравнение между категориями — по доле набранных баллов."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    import pocket
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         f_crypto = pool.submit(scan_all)
         f_forex = pool.submit(scan_forex)
+        f_otc = pool.submit(pocket.scan_otc) if pocket.enabled() else None
         crypto_best, crypto_all = f_crypto.result()
         forex_best, forex_all, _ = f_forex.result()
+        otc_best, otc_all = f_otc.result() if f_otc else (None, [])
 
     def ratio(r):
         return r["score"] / r["max_score"]
 
-    passed = [r for r in (crypto_best, forex_best) if r]
+    passed = [r for r in (crypto_best, forex_best, otc_best) if r]
     if passed:
         return max(passed, key=ratio), None
 
-    candidates = crypto_all + forex_all
+    candidates = crypto_all + forex_all + otc_all
     if candidates:
         return None, max(candidates, key=ratio)
     return None, None

@@ -99,13 +99,18 @@ def format_setup(best):
     text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
     text += f"{arrow} <b>Ставка: {word}</b>\n"
     text += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минута</b>\n"
-    text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n\n"
-    text += "📋 Почему:\n"
+    text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n"
+    if best.get("payout"):
+        text += f"💰 Выплата: <b>+{best['payout']}%</b> (проверено)\n"
+    text += "\n📋 Почему:\n"
     for r in best["reasons"]:
         text += "• " + r + "\n"
     text += f"\n⚡ <b>Вход: на НОВОЙ минуте (через ~{sec_left} сек)</b>\n"
     text += "Открой пару сейчас и жди смены минуты.\n\n"
-    text += "⚠️ Только если выплата ≥ 85% и БЕЗ пометки OTC!"
+    if best.get("otc"):
+        text += "ℹ️ Это OTC-пара — в Pocket Option ищи её С пометкой OTC."
+    else:
+        text += "⚠️ Только если выплата ≥ 85% и БЕЗ пометки OTC!"
     return text
 
 
