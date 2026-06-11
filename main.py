@@ -56,20 +56,15 @@ def answer_callback(callback_id, text=""):
 
 def build_keyboard():
     return [
-        [
-            {"text": "🪙 СЕТАП — КРИПТА", "callback_data": "scan"},
-            {"text": "💱 СЕТАП — ВАЛЮТА", "callback_data": "scan_forex"},
-        ],
+        [{"text": "🎯 ДАЙ СЕТАП", "callback_data": "scan"}],
         [{"text": "ℹ️ Как пользоваться", "callback_data": "howto"}],
     ]
 
 
 WELCOME = (
     "👋 <b>TUSA TRADE — сетапы для Pocket Option</b>\n\n"
-    "Жми кнопку — я просканирую все пары "
-    "и кину лучшую прямо сейчас.\n\n"
-    "🪙 <b>КРИПТА</b> — монеты (работает 24/7)\n"
-    "💱 <b>ВАЛЮТА</b> — валютные пары (пн-пт)\n\n"
+    "Жми <b>🎯 ДАЙ СЕТАП</b> — я просканирую все монеты "
+    "и валютные пары и кину одну лучшую прямо сейчас.\n\n"
     "⚡ Вход: на открытии <b>новой минуты</b>\n"
     "⏱ Экспирация: <b>1 минута</b>\n\n"
     "⚠️ Ставь только пары с выплатой <b>+85%</b> и только <b>БЕЗ пометки OTC</b>!"
@@ -114,62 +109,30 @@ def format_setup(best):
     return text
 
 
-def format_no_setup(results, min_score):
+def format_no_setup(candidate):
     text = "😴 <b>Сейчас чёткого сетапа нет.</b>\n\n"
-    if results:
-        text += "Лучшее, что есть (но слабовато):\n"
-        for r in results[:3]:
-            d = "📈" if r["direction"] == "UP" else "📉"
-            text += f"• {r['name']} {d} — {r['score']}/{r['max_score']}\n"
-        text += f"\nНужно минимум {min_score}. "
+    if candidate:
+        d = "📈" if candidate["direction"] == "UP" else "📉"
+        text += (
+            f"Ближе всех к сетапу: {candidate['name']} {d} — "
+            f"{candidate['score']}/{candidate['max_score']}, но этого мало.\n\n"
+        )
     text += "Рынок мутный — лучше подождать. Попробуй через 2-3 минуты."
     return text
 
 
 def handle_scan(chat_id):
     try:
-        best, results = signals.scan_all()
+        best, candidate = signals.scan_best()
         if best:
             send_message(chat_id, format_setup(best), build_keyboard())
         else:
-            send_message(
-                chat_id,
-                format_no_setup(results, config.MIN_SCORE),
-                build_keyboard(),
-            )
+            send_message(chat_id, format_no_setup(candidate), build_keyboard())
     except Exception:
         traceback.print_exc()
         send_message(
             chat_id,
             "⚠️ Не получилось загрузить данные. Попробуй ещё раз через минуту.",
-            build_keyboard(),
-        )
-
-
-def handle_scan_forex(chat_id):
-    try:
-        best, results, market_open = signals.scan_forex()
-        if best:
-            send_message(chat_id, format_setup(best), build_keyboard())
-        elif not market_open:
-            send_message(
-                chat_id,
-                "🌙 <b>Валютный рынок закрыт</b> (выходные или праздник).\n"
-                "Форекс работает пн-пт. А крипта работает всегда — жми 🪙!",
-                build_keyboard(),
-            )
-        else:
-            send_message(
-                chat_id,
-                format_no_setup(results, config.MIN_SCORE_FOREX),
-                build_keyboard(),
-            )
-    except Exception:
-        traceback.print_exc()
-        send_message(
-            chat_id,
-            "⚠️ Не получилось загрузить данные по валюте. "
-            "Попробуй ещё раз через минуту.",
             build_keyboard(),
         )
 
@@ -196,11 +159,8 @@ def process_update(upd):
         last_request[user_id] = now
 
         if data == "scan":
-            answer_callback(cq["id"], "Сканирую все монеты…")
+            answer_callback(cq["id"], "Сканирую крипту и валюту…")
             handle_scan(chat_id)
-        elif data == "scan_forex":
-            answer_callback(cq["id"], "Сканирую валютные пары…")
-            handle_scan_forex(chat_id)
         return
 
     # Обычное сообщение / команда

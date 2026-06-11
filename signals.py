@@ -386,3 +386,28 @@ def scan_forex():
     if best["score"] >= config.MIN_SCORE_FOREX:
         return best, results, market_open
     return None, results, market_open
+
+
+# ---------- Общее сканирование: крипта + валюта, одна лучшая ----------
+
+def scan_best():
+    """Сканирует крипту и валюту параллельно.
+    Возвращает (лучший_прошедший_порог, лучший_кандидат_вообще).
+    Сравнение между категориями — по доле набранных баллов."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_crypto = pool.submit(scan_all)
+        f_forex = pool.submit(scan_forex)
+        crypto_best, crypto_all = f_crypto.result()
+        forex_best, forex_all, _ = f_forex.result()
+
+    def ratio(r):
+        return r["score"] / r["max_score"]
+
+    passed = [r for r in (crypto_best, forex_best) if r]
+    if passed:
+        return max(passed, key=ratio), None
+
+    candidates = crypto_all + forex_all
+    if candidates:
+        return None, max(candidates, key=ratio)
+    return None, None
