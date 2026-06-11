@@ -42,11 +42,26 @@ def _reset_client():
 
 
 def pretty_name(asset):
-    """EURUSD_otc -> EUR/USD OTC, BTCUSD_otc -> BTC/USD OTC."""
-    base = asset[:-4] if asset.endswith("_otc") else asset
+    """EURUSD_otc -> EUR/USD OTC, BTCUSD -> BTC/USD."""
+    is_otc = asset.endswith("_otc")
+    base = asset[:-4] if is_otc else asset
     if len(base) == 6:
         base = base[:3] + "/" + base[3:]
-    return base + " OTC"
+    return base + (" OTC" if is_otc else "")
+
+
+# Крипто-основы: для них порог «мёртвого рынка» выше, чем у валют
+CRYPTO_BASES = {
+    "BTC", "ETH", "SOL", "XRP", "ADA", "DOG", "LTC", "BNB", "AVA",
+    "LNK", "DOT", "TRX", "TON", "BCH", "ETC", "XLM", "XMR", "NEO",
+}
+
+
+def _min_atr(asset):
+    base = asset[:3]
+    if base in CRYPTO_BASES:
+        return config.MIN_ATR_PCT
+    return config.MIN_ATR_PCT_FOREX
 
 
 def _to_arrays(candles):
@@ -66,36 +81,43 @@ def _is_pair(asset):
     return len(base) == 6 and base.isalpha() and base.isupper()
 
 
-def scan_otc():
-    """Сканирует OTC-пары с выплатой >= MIN_PAYOUT. Возвращает (best, all)."""
+def scan_po():
+    """Сканирует все пары Покета (обычные + OTC) с выплатой >= MIN_PAYOUT.
+    Возвращает (best, all, ok). ok=False — связи с Покетом нет,
+    надо переключаться на запасные источники."""
     if not enabled():
-        return None, []
+        return None, [], False
 
     with _lock:
         try:
             client = _get_client()
             payouts = client.payout()
+            if not payouts:
+                raise ValueError("пустой список выплат")
         except Exception:
             traceback.print_exc()
             _reset_client()
-            return None, []
+            return None, [], False
 
-        # Только OTC-пары с нормальной выплатой
-        otc = [
+        # Валютные/крипто пары с нормальной выплатой, OTC и обычные
+        assets = [
             (a, p) for a, p in payouts.items()
-            if a.endswith("_otc") and _is_pair(a) and p and p >= config.MIN_PAYOUT
+            if _is_pair(a) and p and p >= config.MIN_PAYOUT
         ]
         # Сначала с самой высокой выплатой
-        otc.sort(key=lambda x: x[1], reverse=True)
-        otc = otc[:config.MAX_OTC_ASSETS]
+        assets.sort(key=lambda x: x[1], reverse=True)
+        assets = assets[:config.MAX_PO_ASSETS]
 
         results = []
-        for asset, payout in otc:
+        for asset, payout in assets:
             try:
                 c1 = client.history(asset, 60)
                 if not c1 or len(c1) < 45:
                     continue
                 o1, h1, l1, cl1, t1 = _to_arrays(c1)
+                # Свечи старые = пара сейчас не торгуется (рынок закрыт)
+                if time.time() - t1 > config.PO_MAX_AGE:
+                    continue
                 c5 = client.history(asset, 300)
                 if not c5 or len(c5) < 45:
                     continue
@@ -104,20 +126,20 @@ def scan_otc():
                 res = signals.score_setup(
                     pretty_name(asset),
                     o1, h1, l1, cl1, None, cl5,
-                    min_atr_pct=config.MIN_ATR_PCT_FOREX,
+                    min_atr_pct=_min_atr(asset),
                 )
                 if res:
                     res["payout"] = payout
-                    res["otc"] = True
+                    res["otc"] = asset.endswith("_otc")
                     results.append(res)
             except Exception:
                 continue
 
     if not results:
-        return None, []
+        return None, [], True
 
     results.sort(key=lambda r: r["score"], reverse=True)
     best = results[0]
     if best["score"] >= config.MIN_SCORE_FOREX:
-        return best, results
-    return None, results
+        return best, results, True
+    return None, results, True

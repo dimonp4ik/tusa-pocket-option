@@ -109,6 +109,8 @@ def format_setup(best):
     text += "Открой пару сейчас и жди смены минуты.\n\n"
     if best.get("otc"):
         text += "ℹ️ Это OTC-пара — в Pocket Option ищи её С пометкой OTC."
+    elif best.get("payout"):
+        text += "ℹ️ Обычная пара — бери её БЕЗ пометки OTC. Выплата проверена."
     else:
         text += "⚠️ Только если выплата ≥ 85% и БЕЗ пометки OTC!"
     return text
