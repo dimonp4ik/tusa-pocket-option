@@ -417,6 +417,10 @@ def scan_best():
     def ratio(r):
         return r["score"] / r["max_score"]
 
+    # Помечаем: это запасные котировки (Binance/Deriv), не сам Покет
+    for r in crypto_all + forex_all:
+        r["backup"] = True
+
     passed = [r for r in (crypto_best, forex_best) if r]
     if passed:
         return max(passed, key=ratio), None
