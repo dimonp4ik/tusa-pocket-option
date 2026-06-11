@@ -1,16 +1,20 @@
 # ============================================================
 # TUSA TRADE — анализ рынка для 1-минутного скальпинга
-# Бот сам сканирует все монеты и выбирает лучший сетап.
+# Крипта: Binance (через зеркало binance.vision) + запас Bybit.
+# Валюта: Deriv API (реальное время, без ключей).
 # ============================================================
 
+import json
+import time
 import concurrent.futures
 
 import requests
+from websocket import create_connection
 
 import config
 
 
-# ---------- Загрузка свечей ----------
+# ---------- Крипта: загрузка свечей ----------
 # Основной источник: data-api.binance.vision — официальное зеркало Binance
 # для рыночных данных, работает с американских IP (Render не блокируется).
 # Запасные: api.binance.com, потом Bybit.
@@ -73,6 +77,32 @@ def fetch_binance(symbol, interval, limit=60):
         raise last_err
 
 
+# ---------- Валюта: загрузка свечей с Deriv ----------
+
+DERIV_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+
+
+def _deriv_request(ws, symbol, granularity, count=60):
+    """Запрашивает свечи по одному символу через открытое соединение."""
+    ws.send(json.dumps({
+        "ticks_history": symbol,
+        "style": "candles",
+        "granularity": granularity,
+        "count": count,
+        "end": "latest",
+    }))
+    resp = json.loads(ws.recv())
+    if "error" in resp:
+        raise ValueError(resp["error"].get("message", "deriv error"))
+    candles = resp["candles"]
+    opens = [c["open"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    closes = [c["close"] for c in candles]
+    last_epoch = candles[-1]["epoch"]
+    return opens, highs, lows, closes, last_epoch
+
+
 # ---------- Индикаторы ----------
 
 def ema(values, period):
@@ -113,23 +143,23 @@ def atr(highs, lows, period=14):
     return sum(ranges) / len(ranges)
 
 
-# ---------- Анализ одной монеты ----------
+# ---------- Оценка сетапа (общая для крипты и валюты) ----------
 
-def analyze(symbol):
-    """Оценка сетапа. Возвращает dict или None (жёсткие фильтры не пройдены)."""
-    o1, h1, l1, c1, v1 = fetch_binance(symbol, "1m", 60)
-    o5, h5, l5, c5, v5 = fetch_binance(symbol, "5m", 60)
-
+def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
+    """Балльная оценка. v1=None для валюты (нет объёма, максимум 6 баллов)."""
     if len(c1) < 40 or len(c5) < 40:
         return None
+
+    if min_atr_pct is None:
+        min_atr_pct = config.MIN_ATR_PCT
 
     price = c1[-1]
     a = atr(h1, l1, 14)
 
-    # --- ЖЁСТКИЕ ФИЛЬТРЫ: не прошёл — монета выбывает ---
+    # --- ЖЁСТКИЕ ФИЛЬТРЫ: не прошёл — пара выбывает ---
 
     # 1. Мёртвый рынок: движения слишком мелкие, сигналы = шум
-    if a / price * 100 < config.MIN_ATR_PCT:
+    if a / price * 100 < min_atr_pct:
         return None
 
     # 2. Новостная свеча: аномальный размах, непредсказуемо
@@ -137,7 +167,7 @@ def analyze(symbol):
     if a > 0 and last_range > a * config.MAX_CANDLE_VS_ATR:
         return None
 
-    # --- БАЛЛЫ (максимум 7) ---
+    # --- БАЛЛЫ ---
 
     rsi1 = rsi(c1, config.RSI_PERIOD)
     bb_low, bb_mid, bb_high = bollinger(c1, config.BB_PERIOD, config.BB_STD)
@@ -186,15 +216,18 @@ def analyze(symbol):
         down += 1
         down_r.append("длинный верхний хвост — продавцы отбили цену")
 
-    # 4. Всплеск объёма — 1 балл (подтверждает обе стороны разворота)
-    avg_vol = sum(v1[-21:-1]) / 20
-    if avg_vol > 0 and v1[-1] >= avg_vol * config.VOLUME_SPIKE:
-        if up >= down:
-            up += 1
-            up_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
-        else:
-            down += 1
-            down_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
+    # 4. Всплеск объёма — 1 балл (только крипта, у форекса объёма нет)
+    max_score = 6
+    if v1 is not None:
+        max_score = 7
+        avg_vol = sum(v1[-21:-1]) / 20
+        if avg_vol > 0 and v1[-1] >= avg_vol * config.VOLUME_SPIKE:
+            if up >= down:
+                up += 1
+                up_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
+            else:
+                down += 1
+                down_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
 
     # 5. Тренд 5-минутки — 1 балл
     if ema_fast5 > ema_slow5:
@@ -210,24 +243,29 @@ def analyze(symbol):
         direction, score, reasons = "DOWN", down, down_r
 
     return {
-        "symbol": symbol,
-        "name": config.PAIRS.get(symbol, symbol),
+        "name": name,
         "direction": direction,
         "score": score,
-        "max_score": 7,
+        "max_score": max_score,
         "reasons": reasons,
         "price": price,
         "rsi": rsi1,
     }
 
 
-# ---------- Сканирование всех монет ----------
+# ---------- Сканирование: КРИПТА ----------
+
+def analyze_crypto(symbol):
+    o1, h1, l1, c1, v1 = fetch_binance(symbol, "1m", 60)
+    o5, h5, l5, c5, v5 = fetch_binance(symbol, "5m", 60)
+    return score_setup(config.PAIRS.get(symbol, symbol), o1, h1, l1, c1, v1, c5)
+
 
 def scan_all():
-    """Анализирует все монеты параллельно, возвращает (лучший, все результаты)."""
+    """Сканирует все монеты параллельно, возвращает (лучший, все)."""
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(analyze, s): s for s in config.PAIRS}
+        futures = {pool.submit(analyze_crypto, s): s for s in config.PAIRS}
         for f in concurrent.futures.as_completed(futures):
             try:
                 res = f.result()
@@ -244,3 +282,42 @@ def scan_all():
     if best["score"] >= config.MIN_SCORE:
         return best, results
     return None, results
+
+
+# ---------- Сканирование: ВАЛЮТА ----------
+
+def scan_forex():
+    """Сканирует валютные пары через одно соединение с Deriv.
+    Возвращает (лучший, все, рынок_открыт)."""
+    results = []
+    market_open = False
+
+    ws = create_connection(DERIV_URL, timeout=15)
+    try:
+        for symbol, name in config.FOREX_PAIRS.items():
+            try:
+                o1, h1, l1, c1, ep1 = _deriv_request(ws, symbol, 60)
+                # Свечи старые = рынок закрыт (выходные/праздники)
+                if time.time() - ep1 > config.FOREX_MAX_AGE:
+                    continue
+                market_open = True
+                o5, h5, l5, c5, ep5 = _deriv_request(ws, symbol, 300)
+                res = score_setup(
+                    name, o1, h1, l1, c1, None, c5,
+                    min_atr_pct=config.MIN_ATR_PCT_FOREX,
+                )
+                if res:
+                    results.append(res)
+            except Exception:
+                continue
+    finally:
+        ws.close()
+
+    if not results:
+        return None, [], market_open
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    best = results[0]
+    if best["score"] >= config.MIN_SCORE_FOREX:
+        return best, results, market_open
+    return None, results, market_open
