@@ -175,6 +175,19 @@ def process_update(upd):
             send_message(chat_id, "Жми кнопку 👇", build_keyboard())
 
 
+def keep_alive_loop():
+    """Пингует свой URL каждые 10 минут, чтобы Render не усыпил сервис."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not url:
+        return
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(url, timeout=15)
+        except Exception:
+            pass
+
+
 def polling_loop():
     offset = 0
     print("TUSA TRADE запущен, слушаю Telegram…")
@@ -203,6 +216,9 @@ if __name__ == "__main__":
 
     t = threading.Thread(target=polling_loop, daemon=True)
     t.start()
+
+    ka = threading.Thread(target=keep_alive_loop, daemon=True)
+    ka.start()
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
