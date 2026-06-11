@@ -10,24 +10,67 @@ import requests
 import config
 
 
-# ---------- Загрузка свечей с Binance ----------
+# ---------- Загрузка свечей ----------
+# Основной источник: data-api.binance.vision — официальное зеркало Binance
+# для рыночных данных, работает с американских IP (Render не блокируется).
+# Запасные: api.binance.com, потом Bybit.
 
-def fetch_binance(symbol, interval, limit=60):
-    """Свечи Binance: open/high/low/close/volume."""
-    url = "https://api.binance.com/api/v3/klines"
-    r = requests.get(
-        url,
-        params={"symbol": symbol, "interval": interval, "limit": limit},
-        timeout=10,
-    )
-    r.raise_for_status()
-    data = r.json()
+BINANCE_URLS = [
+    "https://data-api.binance.vision/api/v3/klines",
+    "https://api.binance.com/api/v3/klines",
+]
+
+
+def _parse_binance(data):
     opens = [float(k[1]) for k in data]
     highs = [float(k[2]) for k in data]
     lows = [float(k[3]) for k in data]
     closes = [float(k[4]) for k in data]
     volumes = [float(k[5]) for k in data]
     return opens, highs, lows, closes, volumes
+
+
+def _fetch_bybit(symbol, interval, limit):
+    """Запасной источник: Bybit. interval '1m'/'5m' -> '1'/'5'."""
+    r = requests.get(
+        "https://api.bybit.com/v5/market/kline",
+        params={
+            "category": "spot",
+            "symbol": symbol,
+            "interval": interval.replace("m", ""),
+            "limit": limit,
+        },
+        timeout=10,
+    )
+    r.raise_for_status()
+    rows = r.json()["result"]["list"]
+    rows.reverse()  # Bybit отдаёт новые первыми, разворачиваем
+    opens = [float(k[1]) for k in rows]
+    highs = [float(k[2]) for k in rows]
+    lows = [float(k[3]) for k in rows]
+    closes = [float(k[4]) for k in rows]
+    volumes = [float(k[5]) for k in rows]
+    return opens, highs, lows, closes, volumes
+
+
+def fetch_binance(symbol, interval, limit=60):
+    """Свечи: open/high/low/close/volume. Перебирает источники по очереди."""
+    last_err = None
+    for url in BINANCE_URLS:
+        try:
+            r = requests.get(
+                url,
+                params={"symbol": symbol, "interval": interval, "limit": limit},
+                timeout=10,
+            )
+            r.raise_for_status()
+            return _parse_binance(r.json())
+        except Exception as e:
+            last_err = e
+    try:
+        return _fetch_bybit(symbol, interval, limit)
+    except Exception:
+        raise last_err
 
 
 # ---------- Индикаторы ----------
