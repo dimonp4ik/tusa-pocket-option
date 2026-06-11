@@ -143,6 +143,55 @@ def atr(highs, lows, period=14):
     return sum(ranges) / len(ranges)
 
 
+def stochastic(highs, lows, closes, k_period, smooth, d_period):
+    """Медленный Stochastic. Возвращает (%K сейчас, %K раньше, %D сейчас, %D раньше)."""
+    raw = []
+    for i in range(k_period - 1, len(closes)):
+        hh = max(highs[i - k_period + 1:i + 1])
+        ll = min(lows[i - k_period + 1:i + 1])
+        raw.append(100.0 * (closes[i] - ll) / (hh - ll) if hh > ll else 50.0)
+    k = [sum(raw[i - smooth + 1:i + 1]) / smooth
+         for i in range(smooth - 1, len(raw))]
+    d = [sum(k[i - d_period + 1:i + 1]) / d_period
+         for i in range(d_period - 1, len(k))]
+    return k[-1], k[-2], d[-1], d[-2]
+
+
+def adx(highs, lows, closes, period=14):
+    """ADX по Уайлдеру: сила тренда (0-100)."""
+    trs, pdms, ndms = [], [], []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+        up_m = highs[i] - highs[i - 1]
+        dn_m = lows[i - 1] - lows[i]
+        pdms.append(up_m if (up_m > dn_m and up_m > 0) else 0.0)
+        ndms.append(dn_m if (dn_m > up_m and dn_m > 0) else 0.0)
+
+    atr_s = sum(trs[:period])
+    pdm_s = sum(pdms[:period])
+    ndm_s = sum(ndms[:period])
+    dxs = []
+    for i in range(period, len(trs)):
+        atr_s = atr_s - atr_s / period + trs[i]
+        pdm_s = pdm_s - pdm_s / period + pdms[i]
+        ndm_s = ndm_s - ndm_s / period + ndms[i]
+        pdi = 100.0 * pdm_s / atr_s if atr_s > 0 else 0.0
+        ndi = 100.0 * ndm_s / atr_s if atr_s > 0 else 0.0
+        dxs.append(100.0 * abs(pdi - ndi) / (pdi + ndi) if pdi + ndi > 0 else 0.0)
+
+    if len(dxs) < period:
+        return 0.0
+    a = sum(dxs[:period]) / period
+    for x in dxs[period:]:
+        a = (a * (period - 1) + x) / period
+    return a
+
+
 # ---------- Оценка сетапа (общая для крипты и валюты) ----------
 
 def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
@@ -165,6 +214,11 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     # 2. Новостная свеча: аномальный размах, непредсказуемо
     last_range = h1[-1] - l1[-1]
     if a > 0 and last_range > a * config.MAX_CANDLE_VS_ATR:
+        return None
+
+    # 3. «Падающий нож»: ADX слишком высокий = тренд-поезд,
+    # ловить разворот против него — верный слив
+    if adx(h1, l1, c1, config.ADX_PERIOD) > config.ADX_MAX:
         return None
 
     # --- БАЛЛЫ ---
@@ -216,10 +270,21 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
         down += 1
         down_r.append("длинный верхний хвост — продавцы отбили цену")
 
-    # 4. Всплеск объёма — 1 балл (только крипта, у форекса объёма нет)
-    max_score = 6
+    # 4. Stochastic: пересечение %K/%D в крайней зоне — 1 балл
+    k_now, k_prev, d_now, d_prev = stochastic(
+        h1, l1, c1, config.STOCH_K, config.STOCH_SMOOTH, config.STOCH_D,
+    )
+    if k_prev <= d_prev and k_now > d_now and k_now <= config.STOCH_LOW:
+        up += 1
+        up_r.append(f"Stochastic развернулся вверх из перепроданности ({k_now:.0f})")
+    if k_prev >= d_prev and k_now < d_now and k_now >= config.STOCH_HIGH:
+        down += 1
+        down_r.append(f"Stochastic развернулся вниз из перекупленности ({k_now:.0f})")
+
+    # 5. Всплеск объёма — 1 балл (только крипта, у форекса объёма нет)
+    max_score = 7
     if v1 is not None:
-        max_score = 7
+        max_score = 8
         avg_vol = sum(v1[-21:-1]) / 20
         if avg_vol > 0 and v1[-1] >= avg_vol * config.VOLUME_SPIKE:
             if up >= down:
@@ -229,7 +294,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
                 down += 1
                 down_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
 
-    # 5. Тренд 5-минутки — 1 балл
+    # 6. Тренд 5-минутки — 1 балл
     if ema_fast5 > ema_slow5:
         up += 1
         up_r.append("тренд 5м вверх")
