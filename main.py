@@ -1,11 +1,14 @@
 # ============================================================
-# TUSA TRADE — сетапы для Pocket Option по нажатию кнопки
+# TUSA TRADE — бот сетапов для Pocket Option
+# Жми кнопку — бот сканирует все монеты и кидает лучший сетап.
+# Вход на новой минуте, экспирация 1 минута.
 # ============================================================
 
 import os
 import time
 import threading
 import traceback
+from datetime import datetime, timezone
 
 import requests
 from flask import Flask
@@ -49,83 +52,87 @@ def answer_callback(callback_id, text=""):
     tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
 
-# ---------- Клавиатура с парами ----------
+# ---------- Клавиатура ----------
 
 def build_keyboard():
-    rows = []
-    forex = list(config.FOREX_PAIRS.items())
-    crypto = list(config.CRYPTO_PAIRS.items())
-
-    rows.append([{"text": "💱 ВАЛЮТНЫЕ ПАРЫ", "callback_data": "noop"}])
-    for i in range(0, len(forex), 2):
-        row = []
-        for sym, name in forex[i:i + 2]:
-            row.append({"text": name, "callback_data": "go|yahoo|" + sym})
-        rows.append(row)
-
-    rows.append([{"text": "🪙 МОНЕТЫ", "callback_data": "noop"}])
-    for i in range(0, len(crypto), 2):
-        row = []
-        for sym, name in crypto[i:i + 2]:
-            row.append({"text": name, "callback_data": "go|binance|" + sym})
-        rows.append(row)
-
-    return rows
+    return [
+        [{"text": "🎯 ДАЙ СЕТАП", "callback_data": "scan"}],
+        [{"text": "ℹ️ Как пользоваться", "callback_data": "howto"}],
+    ]
 
 
 WELCOME = (
     "👋 <b>TUSA TRADE — сетапы для Pocket Option</b>\n\n"
-    "Нажми на пару — я мгновенно проанализирую график "
-    "и кину сетап: куда ставить и на сколько минут.\n\n"
-    "⚠️ <b>Важно:</b> ставь только те пары, у которых в Pocket Option "
-    "выплата <b>+85% и выше</b>. Если выплата ниже — выбери другую пару.\n\n"
-    "Выбирай пару: 👇"
+    "Жми <b>🎯 ДАЙ СЕТАП</b> — я просканирую все монеты "
+    "и кину лучшую прямо сейчас.\n\n"
+    "⚡ Вход: на открытии <b>новой минуты</b>\n"
+    "⏱ Экспирация: <b>1 минута</b>\n\n"
+    "⚠️ Ставь только пары с выплатой <b>+85%</b> и только <b>БЕЗ пометки OTC</b>!"
+)
+
+HOWTO = (
+    "📖 <b>Как пользоваться TUSA TRADE</b>\n\n"
+    "1️⃣ Жми <b>🎯 ДАЙ СЕТАП</b>\n"
+    "2️⃣ Бот сканирует все монеты и выбирает лучшую\n"
+    "3️⃣ Открой эту пару в Pocket Option\n"
+    "4️⃣ Проверь: выплата <b>+85% или выше</b>, пара <b>БЕЗ пометки OTC</b>\n"
+    "5️⃣ Дождись, пока на часах начнётся <b>новая минута</b> (секунды 00) "
+    "— и сразу ставь в указанную сторону\n"
+    "6️⃣ Экспирация — <b>1 минута</b>\n\n"
+    "❗ Если бот пишет «сетапа нет» — НЕ ставь. Лучше пропустить, чем слить.\n"
+    "❗ Сетап живёт 1-2 минуты. Протормозил — запроси новый.\n"
+    "❗ Не ставь больше 2-3% от депозита на сделку."
 )
 
 
-# ---------- Формирование ответа ----------
+# ---------- Формирование сетапа ----------
 
-def pair_name(source, symbol):
-    if source == "binance":
-        return config.CRYPTO_PAIRS.get(symbol, symbol)
-    return config.FOREX_PAIRS.get(symbol, symbol)
-
-
-def format_setup(name, res):
-    if res["direction"] == "UP":
+def format_setup(best):
+    if best["direction"] == "UP":
         arrow, word = "📈", "ВВЕРХ (выше)"
     else:
         arrow, word = "📉", "ВНИЗ (ниже)"
 
-    if res["good"]:
-        head = f"🎯 <b>СЕТАП: {name}</b>\n\n"
-        head += f"{arrow} <b>Ставка: {word}</b>\n"
-        head += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минут</b>\n"
-        head += f"💪 Сила сетапа: <b>{res['score']}/{res['max_score']}</b>\n\n"
-        head += "📋 Почему:\n"
-        for r in res["reasons"]:
-            head += "• " + r + "\n"
-        head += "\n⚠️ Ставь сразу — сетап живёт пару минут.\n"
-        head += "Только если выплата ≥ 85%!"
-        return head
+    now = datetime.now(timezone.utc)
+    sec_left = 60 - now.second
 
-    head = f"😴 <b>{name}</b> — чёткого сетапа сейчас нет "
-    head += f"(сила {res['score']}/{res['max_score']}, нужно {config.MIN_SCORE}+).\n\n"
-    head += "Лучше не ставить. Попробуй другую пару или зайди через пару минут."
-    return head
+    text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
+    text += f"{arrow} <b>Ставка: {word}</b>\n"
+    text += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минута</b>\n"
+    text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n\n"
+    text += "📋 Почему:\n"
+    for r in best["reasons"]:
+        text += "• " + r + "\n"
+    text += f"\n⚡ <b>Вход: на НОВОЙ минуте (через ~{sec_left} сек)</b>\n"
+    text += "Открой пару сейчас и жди смены минуты.\n\n"
+    text += "⚠️ Только если выплата ≥ 85% и БЕЗ пометки OTC!"
+    return text
 
 
-def handle_pair(chat_id, source, symbol):
-    name = pair_name(source, symbol)
+def format_no_setup(results):
+    text = "😴 <b>Сейчас чёткого сетапа нет.</b>\n\n"
+    if results:
+        text += "Лучшее, что есть (но слабовато):\n"
+        for r in results[:3]:
+            d = "📈" if r["direction"] == "UP" else "📉"
+            text += f"• {r['name']} {d} — {r['score']}/{r['max_score']}\n"
+        text += f"\nНужно минимум {config.MIN_SCORE}/7. "
+    text += "Рынок мутный — лучше подождать. Попробуй через 2-3 минуты."
+    return text
+
+
+def handle_scan(chat_id):
     try:
-        res = signals.analyze(symbol, source)
-        send_message(chat_id, format_setup(name, res), build_keyboard())
+        best, results = signals.scan_all()
+        if best:
+            send_message(chat_id, format_setup(best), build_keyboard())
+        else:
+            send_message(chat_id, format_no_setup(results), build_keyboard())
     except Exception:
         traceback.print_exc()
         send_message(
             chat_id,
-            f"⚠️ Не получилось загрузить данные по {name}. "
-            "Попробуй ещё раз через минуту.",
+            "⚠️ Не получилось загрузить данные. Попробуй ещё раз через минуту.",
             build_keyboard(),
         )
 
@@ -140,8 +147,9 @@ def process_update(upd):
         user_id = cq["from"]["id"]
         data = cq.get("data", "")
 
-        if data == "noop":
+        if data == "howto":
             answer_callback(cq["id"])
+            send_message(chat_id, HOWTO, build_keyboard())
             return
 
         now = time.time()
@@ -150,10 +158,9 @@ def process_update(upd):
             return
         last_request[user_id] = now
 
-        if data.startswith("go|"):
-            _, source, symbol = data.split("|", 2)
-            answer_callback(cq["id"], "Анализирую…")
-            handle_pair(chat_id, source, symbol)
+        if data == "scan":
+            answer_callback(cq["id"], "Сканирую все монеты…")
+            handle_scan(chat_id)
         return
 
     # Обычное сообщение / команда
@@ -165,12 +172,12 @@ def process_update(upd):
         if text.startswith("/start") or text.startswith("/help"):
             send_message(chat_id, WELCOME, build_keyboard())
         elif text:
-            send_message(chat_id, "Жми кнопку с парой 👇", build_keyboard())
+            send_message(chat_id, "Жми кнопку 👇", build_keyboard())
 
 
 def polling_loop():
     offset = 0
-    print("Бот запущен, слушаю Telegram…")
+    print("TUSA TRADE запущен, слушаю Telegram…")
     while True:
         try:
             r = requests.get(

@@ -1,18 +1,19 @@
 # ============================================================
-# АНАЛИЗ РЫНКА: загрузка свечей + индикаторы + оценка сетапа
+# TUSA TRADE — анализ рынка для 1-минутного скальпинга
+# Бот сам сканирует все монеты и выбирает лучший сетап.
 # ============================================================
+
+import concurrent.futures
 
 import requests
 
 import config
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
+# ---------- Загрузка свечей с Binance ----------
 
-# ---------- Загрузка свечей ----------
-
-def fetch_binance(symbol, interval, limit=120):
-    """Свечи с Binance: списки open/high/low/close."""
+def fetch_binance(symbol, interval, limit=60):
+    """Свечи Binance: open/high/low/close/volume."""
     url = "https://api.binance.com/api/v3/klines"
     r = requests.get(
         url,
@@ -25,37 +26,8 @@ def fetch_binance(symbol, interval, limit=120):
     highs = [float(k[2]) for k in data]
     lows = [float(k[3]) for k in data]
     closes = [float(k[4]) for k in data]
-    return opens, highs, lows, closes
-
-
-def fetch_yahoo(symbol, interval):
-    """Свечи с Yahoo Finance (для валютных пар)."""
-    rng = "1d" if interval == "1m" else "5d"
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol
-    r = requests.get(
-        url,
-        params={"interval": interval, "range": rng},
-        headers=HEADERS,
-        timeout=10,
-    )
-    r.raise_for_status()
-    result = r.json()["chart"]["result"][0]
-    quote = result["indicators"]["quote"][0]
-    opens, highs, lows, closes = [], [], [], []
-    for o, h, l, c in zip(quote["open"], quote["high"], quote["low"], quote["close"]):
-        if o is None or h is None or l is None or c is None:
-            continue
-        opens.append(o)
-        highs.append(h)
-        lows.append(l)
-        closes.append(c)
-    return opens[-120:], highs[-120:], lows[-120:], closes[-120:]
-
-
-def fetch_candles(symbol, source, interval):
-    if source == "binance":
-        return fetch_binance(symbol, interval)
-    return fetch_yahoo(symbol, interval)
+    volumes = [float(k[5]) for k in data]
+    return opens, highs, lows, closes, volumes
 
 
 # ---------- Индикаторы ----------
@@ -68,7 +40,7 @@ def ema(values, period):
     return e
 
 
-def rsi(closes, period=14):
+def rsi(closes, period):
     gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i - 1]
@@ -85,7 +57,7 @@ def rsi(closes, period=14):
     return 100.0 - 100.0 / (1.0 + rs)
 
 
-def bollinger(closes, period=20, num_std=2.0):
+def bollinger(closes, period, num_std):
     window = closes[-period:]
     mid = sum(window) / period
     var = sum((c - mid) ** 2 for c in window) / period
@@ -93,90 +65,139 @@ def bollinger(closes, period=20, num_std=2.0):
     return mid - num_std * std, mid, mid + num_std * std
 
 
-# ---------- Оценка сетапа ----------
+def atr(highs, lows, period=14):
+    ranges = [h - l for h, l in zip(highs[-period:], lows[-period:])]
+    return sum(ranges) / len(ranges)
 
-def analyze(symbol, source):
-    """Возвращает словарь с направлением, баллом и причинами."""
-    o1, h1, l1, c1 = fetch_candles(symbol, source, "1m")
-    o5, h5, l5, c5 = fetch_candles(symbol, source, "5m")
+
+# ---------- Анализ одной монеты ----------
+
+def analyze(symbol):
+    """Оценка сетапа. Возвращает dict или None (жёсткие фильтры не пройдены)."""
+    o1, h1, l1, c1, v1 = fetch_binance(symbol, "1m", 60)
+    o5, h5, l5, c5, v5 = fetch_binance(symbol, "5m", 60)
 
     if len(c1) < 40 or len(c5) < 40:
-        raise ValueError("мало данных")
+        return None
 
     price = c1[-1]
+    a = atr(h1, l1, 14)
+
+    # --- ЖЁСТКИЕ ФИЛЬТРЫ: не прошёл — монета выбывает ---
+
+    # 1. Мёртвый рынок: движения слишком мелкие, сигналы = шум
+    if a / price * 100 < config.MIN_ATR_PCT:
+        return None
+
+    # 2. Новостная свеча: аномальный размах, непредсказуемо
+    last_range = h1[-1] - l1[-1]
+    if a > 0 and last_range > a * config.MAX_CANDLE_VS_ATR:
+        return None
+
+    # --- БАЛЛЫ (максимум 7) ---
+
     rsi1 = rsi(c1, config.RSI_PERIOD)
-    rsi5 = rsi(c5, config.RSI_PERIOD)
     bb_low, bb_mid, bb_high = bollinger(c1, config.BB_PERIOD, config.BB_STD)
     ema_fast5 = ema(c5, config.EMA_FAST)
     ema_slow5 = ema(c5, config.EMA_SLOW)
 
-    up_score, down_score = 0, 0
-    up_reasons, down_reasons = [], []
+    up, down = 0, 0
+    up_r, down_r = [], []
 
-    # 1. RSI на 1-минутке (до 2 баллов)
-    if rsi1 <= config.RSI_OVERSOLD:
-        up_score += 2
-        up_reasons.append(f"RSI 1м перепродан ({rsi1:.0f})")
-    elif rsi1 <= config.RSI_OVERSOLD + 5:
-        up_score += 1
-        up_reasons.append(f"RSI 1м близко к перепроданности ({rsi1:.0f})")
-    if rsi1 >= config.RSI_OVERBOUGHT:
-        down_score += 2
-        down_reasons.append(f"RSI 1м перекуплен ({rsi1:.0f})")
-    elif rsi1 >= config.RSI_OVERBOUGHT - 5:
-        down_score += 1
-        down_reasons.append(f"RSI 1м близко к перекупленности ({rsi1:.0f})")
+    # 1. Быстрый RSI(7) — до 2 баллов
+    if rsi1 <= config.RSI_EXTREME_LOW:
+        up += 2
+        up_r.append(f"RSI сильно перепродан ({rsi1:.0f})")
+    elif rsi1 <= config.RSI_OVERSOLD:
+        up += 1
+        up_r.append(f"RSI перепродан ({rsi1:.0f})")
+    if rsi1 >= config.RSI_EXTREME_HIGH:
+        down += 2
+        down_r.append(f"RSI сильно перекуплен ({rsi1:.0f})")
+    elif rsi1 >= config.RSI_OVERBOUGHT:
+        down += 1
+        down_r.append(f"RSI перекуплен ({rsi1:.0f})")
 
-    # 2. Bollinger Bands на 1-минутке (до 2 баллов)
-    if price <= bb_low:
-        up_score += 2
-        up_reasons.append("цена пробила нижнюю полосу Bollinger")
-    elif price <= bb_low + (bb_mid - bb_low) * 0.2:
-        up_score += 1
-        up_reasons.append("цена у нижней полосы Bollinger")
-    if price >= bb_high:
-        down_score += 2
-        down_reasons.append("цена пробила верхнюю полосу Bollinger")
-    elif price >= bb_high - (bb_high - bb_mid) * 0.2:
-        down_score += 1
-        down_reasons.append("цена у верхней полосы Bollinger")
+    # 2. Bollinger: прокол полосы + возврат внутрь — до 2 баллов
+    if l1[-1] < bb_low and price > bb_low:
+        up += 2
+        up_r.append("прокол нижней Bollinger и возврат внутрь")
+    elif price <= bb_low:
+        up += 1
+        up_r.append("цена ниже нижней Bollinger")
+    if h1[-1] > bb_high and price < bb_high:
+        down += 2
+        down_r.append("прокол верхней Bollinger и возврат внутрь")
+    elif price >= bb_high:
+        down += 1
+        down_r.append("цена выше верхней Bollinger")
 
-    # 3. RSI на 5-минутке подтверждает (1 балл)
-    if rsi5 <= 40:
-        up_score += 1
-        up_reasons.append(f"RSI 5м тоже низкий ({rsi5:.0f})")
-    if rsi5 >= 60:
-        down_score += 1
-        down_reasons.append(f"RSI 5м тоже высокий ({rsi5:.0f})")
+    # 3. Хвост свечи (wick rejection) — 1 балл
+    body = abs(c1[-1] - o1[-1])
+    lower_wick = min(c1[-1], o1[-1]) - l1[-1]
+    upper_wick = h1[-1] - max(c1[-1], o1[-1])
+    if body > 0 and lower_wick >= body * 2:
+        up += 1
+        up_r.append("длинный нижний хвост — покупатели отбили цену")
+    if body > 0 and upper_wick >= body * 2:
+        down += 1
+        down_r.append("длинный верхний хвост — продавцы отбили цену")
 
-    # 4. Разворотная свеча после серии (1 балл)
-    if c1[-1] > o1[-1] and c1[-2] < o1[-2] and c1[-3] < o1[-3]:
-        up_score += 1
-        up_reasons.append("зелёная разворотная свеча после красных")
-    if c1[-1] < o1[-1] and c1[-2] > o1[-2] and c1[-3] > o1[-3]:
-        down_score += 1
-        down_reasons.append("красная разворотная свеча после зелёных")
+    # 4. Всплеск объёма — 1 балл (подтверждает обе стороны разворота)
+    avg_vol = sum(v1[-21:-1]) / 20
+    if avg_vol > 0 and v1[-1] >= avg_vol * config.VOLUME_SPIKE:
+        if up >= down:
+            up += 1
+            up_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
+        else:
+            down += 1
+            down_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
 
-    # 5. Тренд на 5-минутке по EMA (1 балл)
+    # 5. Тренд 5-минутки — 1 балл
     if ema_fast5 > ema_slow5:
-        up_score += 1
-        up_reasons.append("тренд 5м вверх (EMA9 > EMA21)")
+        up += 1
+        up_r.append("тренд 5м вверх")
     else:
-        down_score += 1
-        down_reasons.append("тренд 5м вниз (EMA9 < EMA21)")
+        down += 1
+        down_r.append("тренд 5м вниз")
 
-    if up_score >= down_score:
-        direction, score, reasons = "UP", up_score, up_reasons
+    if up >= down:
+        direction, score, reasons = "UP", up, up_r
     else:
-        direction, score, reasons = "DOWN", down_score, down_reasons
+        direction, score, reasons = "DOWN", down, down_r
 
     return {
+        "symbol": symbol,
+        "name": config.PAIRS.get(symbol, symbol),
         "direction": direction,
         "score": score,
         "max_score": 7,
         "reasons": reasons,
         "price": price,
-        "rsi1": rsi1,
-        "rsi5": rsi5,
-        "good": score >= config.MIN_SCORE,
+        "rsi": rsi1,
     }
+
+
+# ---------- Сканирование всех монет ----------
+
+def scan_all():
+    """Анализирует все монеты параллельно, возвращает (лучший, все результаты)."""
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(analyze, s): s for s in config.PAIRS}
+        for f in concurrent.futures.as_completed(futures):
+            try:
+                res = f.result()
+                if res:
+                    results.append(res)
+            except Exception:
+                pass
+
+    if not results:
+        return None, []
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    best = results[0]
+    if best["score"] >= config.MIN_SCORE:
+        return best, results
+    return None, results
