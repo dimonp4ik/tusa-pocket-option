@@ -88,16 +88,16 @@ HOWTO = (
 # ---------- Формирование сетапа ----------
 
 def format_setup(best):
-    if best["direction"] == "UP":
-        arrow, word = "📈", "ВВЕРХ (выше)"
-    else:
-        arrow, word = "📉", "ВНИЗ (ниже)"
+    word = "ВВЕРХ (выше)" if best["direction"] == "UP" else "ВНИЗ (ниже)"
 
     now = datetime.now(timezone.utc)
     sec_left = 60 - now.second
+    # Если до новой минуты осталось мало — заходим на следующей
+    if sec_left <= 5:
+        sec_left += 60
 
     text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
-    text += f"{arrow} <b>Ставка: {word}</b>\n"
+    text += f"<b>Ставка: {word}</b>\n"
     text += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минута</b>\n"
     text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n"
     if best.get("payout"):
@@ -105,8 +105,8 @@ def format_setup(best):
     text += "\n📋 Почему:\n"
     for r in best["reasons"]:
         text += "• " + r + "\n"
-    text += f"\n⚡ <b>Вход: на НОВОЙ минуте (через ~{sec_left} сек)</b>\n"
-    text += "Открой пару сейчас и жди смены минуты.\n\n"
+    text += f"\n⚡ <b>Заходи через {sec_left} сек</b> (на новой минуте).\n"
+    text += "Открой пару сейчас и жди.\n\n"
     if best.get("otc"):
         text += "ℹ️ Это OTC-пара — в Pocket Option ищи её С пометкой OTC."
     elif best.get("payout"):
@@ -123,15 +123,15 @@ def format_setup(best):
 
 
 def format_no_setup(candidate):
-    text = "😴 <b>Сейчас чёткого сетапа нет.</b>\n\n"
-    if candidate:
-        d = "📈" if candidate["direction"] == "UP" else "📉"
-        text += (
-            f"Ближе всех к сетапу: {candidate['name']} {d} — "
-            f"{candidate['score']}/{candidate['max_score']}, но этого мало.\n\n"
+    # Слабый кандидат (1/7) не показываем вообще
+    if candidate and candidate["score"] >= 2:
+        d = "ВВЕРХ" if candidate["direction"] == "UP" else "ВНИЗ"
+        return (
+            f"Ближе всех: <b>{candidate['name']} {d}</b> — "
+            f"{candidate['score']}/{candidate['max_score']}, но этого мало. "
+            "Не ставь, жми ещё раз через пару минут."
         )
-    text += "Рынок мутный — лучше подождать. Попробуй через 2-3 минуты."
-    return text
+    return "Пока подходящей пары нет. Жми ещё раз через пару минут."
 
 
 def handle_scan(chat_id):
