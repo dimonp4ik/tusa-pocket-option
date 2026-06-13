@@ -95,6 +95,9 @@ def format_setup(best):
     # Если до новой минуты осталось мало — заходим на следующей
     if sec_left <= 5:
         sec_left += 60
+    # Живая свеча против сетапа — ждём ещё одну минуту (вход через 60-119 сек)
+    if best.get("wait_extra"):
+        sec_left += 60
 
     text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
     text += f"<b>Ставка: {word}</b>\n"
@@ -106,6 +109,11 @@ def format_setup(best):
     for r in best["reasons"]:
         text += "• " + r + "\n"
     text += f"\n⚡ <b>Заходи через {sec_left} сек</b> (на новой минуте).\n"
+    if best.get("wait_extra"):
+        text += (
+            "⏳ Текущая свеча ещё идёт против входа — поэтому ждём её "
+            "закрытия и заходим на следующей минуте.\n"
+        )
     text += "Открой пару сейчас и жди.\n\n"
     if best.get("otc"):
         text += "ℹ️ Это OTC-пара — в Pocket Option ищи её С пометкой OTC."

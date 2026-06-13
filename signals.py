@@ -307,6 +307,17 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     else:
         direction, score, reasons = "DOWN", down, down_r
 
+    # Живая (ещё не закрытая) свеча идёт против сетапа?
+    # Если да — разворот не подтверждён, ждём её закрытия и заходим
+    # на следующей минуте (вход переносится на +1 мин).
+    wait_extra = False
+    live_body = c1[-1] - o1[-1]
+    threshold = a * config.WAIT_EXTRA_ATR
+    if direction == "UP" and live_body < -threshold:
+        wait_extra = True
+    elif direction == "DOWN" and live_body > threshold:
+        wait_extra = True
+
     return {
         "name": name,
         "direction": direction,
@@ -315,6 +326,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
         "reasons": reasons,
         "price": price,
         "rsi": rsi1,
+        "wait_extra": wait_extra,
     }
 
 
