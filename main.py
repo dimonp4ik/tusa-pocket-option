@@ -353,14 +353,16 @@ def keep_alive_loop():
 
 
 def scanner_loop():
-    """Раз в минуту (у границы минуты) сканирует и шлёт сетап активным."""
+    """Сканирует сразу после закрытия свечи и шлёт сетап активным.
+    Так у человека есть ~55 сек найти пару до входа на новой минуте."""
     last_minute = -1
     while True:
         try:
             now = datetime.now(timezone.utc)
             users = tracker.active_users()
-            # Сканируем один раз ближе к концу минуты — свеча почти закрыта
-            if users and now.second >= 50 and now.minute != last_minute:
+            # Триггер в начале новой минуты: свеча только что закрылась —
+            # анализ по свежему подтверждению, вход на следующей минуте
+            if users and now.minute != last_minute:
                 last_minute = now.minute
                 best, _ = signals.scan_best()
                 if best:
