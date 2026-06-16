@@ -207,6 +207,10 @@ def handle_scan(chat_id):
         best, candidate = signals.scan_best()
         if best:
             send_setup(chat_id, best)
+        elif candidate and candidate["score"] >= 2:
+            # Слабый сетап — показываем, но даём кнопку зайти под свой риск
+            token = register_signal(candidate)
+            send_message(chat_id, format_no_setup(candidate), signal_keyboard(token))
         else:
             send_message(chat_id, format_no_setup(candidate), build_keyboard(chat_id))
     except Exception:
