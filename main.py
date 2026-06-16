@@ -101,6 +101,8 @@ def format_setup(best):
 
     text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
     text += f"<b>Ставка: {word}</b>\n"
+    if best.get("regime"):
+        text += f"📊 Тактика: <b>{best['regime']}</b>\n"
     text += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минута</b>\n"
     text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n"
     if best.get("payout"):

@@ -216,96 +216,125 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     if a > 0 and last_range > a * config.MAX_CANDLE_VS_ATR:
         return None
 
-    # 3. «Падающий нож»: ADX слишком высокий = тренд-поезд,
-    # ловить разворот против него — верный слив
-    if adx(h1, l1, c1, config.ADX_PERIOD) > config.ADX_MAX:
+    # 3. Слишком дикий тренд (ADX выше потолка) — непредсказуемо, пропуск
+    adx_val = adx(h1, l1, c1, config.ADX_PERIOD)
+    if adx_val > config.ADX_MAX:
         return None
 
-    # --- БАЛЛЫ ---
-
+    # Общие данные
     rsi1 = rsi(c1, config.RSI_PERIOD)
+    rsi_prev = rsi(c1[:-1], config.RSI_PERIOD)
     bb_low, bb_mid, bb_high = bollinger(c1, config.BB_PERIOD, config.BB_STD)
     ema_fast5 = ema(c5, config.EMA_FAST)
     ema_slow5 = ema(c5, config.EMA_SLOW)
-
-    up, down = 0, 0
-    up_r, down_r = [], []
-
-    # 1. Быстрый RSI(7) — до 2 баллов
-    if rsi1 <= config.RSI_EXTREME_LOW:
-        up += 2
-        up_r.append(f"RSI сильно перепродан ({rsi1:.0f})")
-    elif rsi1 <= config.RSI_OVERSOLD:
-        up += 1
-        up_r.append(f"RSI перепродан ({rsi1:.0f})")
-    if rsi1 >= config.RSI_EXTREME_HIGH:
-        down += 2
-        down_r.append(f"RSI сильно перекуплен ({rsi1:.0f})")
-    elif rsi1 >= config.RSI_OVERBOUGHT:
-        down += 1
-        down_r.append(f"RSI перекуплен ({rsi1:.0f})")
-
-    # 2. Bollinger: прокол полосы + возврат внутрь — до 2 баллов
-    if l1[-1] < bb_low and price > bb_low:
-        up += 2
-        up_r.append("прокол нижней Bollinger и возврат внутрь")
-    elif price <= bb_low:
-        up += 1
-        up_r.append("цена ниже нижней Bollinger")
-    if h1[-1] > bb_high and price < bb_high:
-        down += 2
-        down_r.append("прокол верхней Bollinger и возврат внутрь")
-    elif price >= bb_high:
-        down += 1
-        down_r.append("цена выше верхней Bollinger")
-
-    # 3. Хвост свечи (wick rejection) — 1 балл
-    body = abs(c1[-1] - o1[-1])
-    lower_wick = min(c1[-1], o1[-1]) - l1[-1]
-    upper_wick = h1[-1] - max(c1[-1], o1[-1])
-    if body > 0 and lower_wick >= body * 2:
-        up += 1
-        up_r.append("длинный нижний хвост — покупатели отбили цену")
-    if body > 0 and upper_wick >= body * 2:
-        down += 1
-        down_r.append("длинный верхний хвост — продавцы отбили цену")
-
-    # 4. Stochastic: пересечение %K/%D в крайней зоне — 1 балл
+    ema_fast1 = ema(c1, config.EMA_FAST)
     k_now, k_prev, d_now, d_prev = stochastic(
         h1, l1, c1, config.STOCH_K, config.STOCH_SMOOTH, config.STOCH_D,
     )
-    if k_prev <= d_prev and k_now > d_now and k_now <= config.STOCH_LOW:
-        up += 1
-        up_r.append(f"Stochastic развернулся вверх из перепроданности ({k_now:.0f})")
-    if k_prev >= d_prev and k_now < d_now and k_now >= config.STOCH_HIGH:
-        down += 1
-        down_r.append(f"Stochastic развернулся вниз из перекупленности ({k_now:.0f})")
+    body = abs(c1[-1] - o1[-1])
+    lower_wick = min(c1[-1], o1[-1]) - l1[-1]
+    upper_wick = h1[-1] - max(c1[-1], o1[-1])
+    has_vol = v1 is not None
+    max_score = 7 if has_vol else 6
 
-    # 5. Всплеск объёма — 1 балл (только крипта, у форекса объёма нет)
-    max_score = 7
-    if v1 is not None:
-        max_score = 8
-        avg_vol = sum(v1[-21:-1]) / 20
-        if avg_vol > 0 and v1[-1] >= avg_vol * config.VOLUME_SPIKE:
+    def vol_spike():
+        if not has_vol:
+            return 0.0
+        avg = sum(v1[-21:-1]) / 20
+        return v1[-1] / avg if avg > 0 else 0.0
+
+    # ===== РЕЖИМ РЫНКА =====
+    if adx_val < config.ADX_RANGE:
+        # ----- ПЛОСКИЙ РЫНОК: тактика ОТКАТА (фейдим края) -----
+        regime = "откат"
+        up, down = 0, 0
+        up_r, down_r = [], []
+
+        # RSI крайности — до 2
+        if rsi1 <= config.RSI_EXTREME_LOW:
+            up += 2; up_r.append(f"RSI сильно перепродан ({rsi1:.0f})")
+        elif rsi1 <= config.RSI_OVERSOLD:
+            up += 1; up_r.append(f"RSI перепродан ({rsi1:.0f})")
+        if rsi1 >= config.RSI_EXTREME_HIGH:
+            down += 2; down_r.append(f"RSI сильно перекуплен ({rsi1:.0f})")
+        elif rsi1 >= config.RSI_OVERBOUGHT:
+            down += 1; down_r.append(f"RSI перекуплен ({rsi1:.0f})")
+
+        # Bollinger прокол+возврат — до 2
+        if l1[-1] < bb_low and price > bb_low:
+            up += 2; up_r.append("прокол нижней Bollinger и возврат внутрь")
+        elif price <= bb_low:
+            up += 1; up_r.append("цена у нижней Bollinger")
+        if h1[-1] > bb_high and price < bb_high:
+            down += 2; down_r.append("прокол верхней Bollinger и возврат внутрь")
+        elif price >= bb_high:
+            down += 1; down_r.append("цена у верхней Bollinger")
+
+        # Хвост свечи — 1
+        if body > 0 and lower_wick >= body * 2:
+            up += 1; up_r.append("длинный нижний хвост — покупатели отбили цену")
+        if body > 0 and upper_wick >= body * 2:
+            down += 1; down_r.append("длинный верхний хвост — продавцы отбили цену")
+
+        # Stochastic разворот из крайней зоны — 1
+        if k_prev <= d_prev and k_now > d_now and k_now <= config.STOCH_LOW:
+            up += 1; up_r.append(f"Stochastic развернулся вверх ({k_now:.0f})")
+        if k_prev >= d_prev and k_now < d_now and k_now >= config.STOCH_HIGH:
+            down += 1; down_r.append(f"Stochastic развернулся вниз ({k_now:.0f})")
+
+        # Объём — 1 (крипта)
+        if has_vol and vol_spike() >= config.VOLUME_SPIKE:
             if up >= down:
-                up += 1
-                up_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
+                up += 1; up_r.append(f"всплеск объёма x{vol_spike():.1f}")
             else:
-                down += 1
-                down_r.append(f"всплеск объёма x{v1[-1] / avg_vol:.1f}")
+                down += 1; down_r.append(f"всплеск объёма x{vol_spike():.1f}")
 
-    # 6. Тренд 5-минутки — 1 балл
-    if ema_fast5 > ema_slow5:
-        up += 1
-        up_r.append("тренд 5м вверх")
-    else:
-        down += 1
-        down_r.append("тренд 5м вниз")
+        if up >= down:
+            direction, score, reasons = "UP", up, up_r
+        else:
+            direction, score, reasons = "DOWN", down, down_r
 
-    if up >= down:
-        direction, score, reasons = "UP", up, up_r
     else:
-        direction, score, reasons = "DOWN", down, down_r
+        # ----- ТРЕНД: тактика ПРОДОЛЖЕНИЯ (входим ПО тренду на откате) -----
+        regime = "тренд"
+        is_up = ema_fast5 > ema_slow5
+        direction = "UP" if is_up else "DOWN"
+        score = 0
+        reasons = []
+        tdir = "вверх" if is_up else "вниз"
+        reasons.append(f"тренд 5м {tdir} (ADX {adx_val:.0f})")
+
+        # 1. Откат закончился, свеча пошла обратно по тренду — до 2
+        resumed = (c1[-1] > o1[-1]) if is_up else (c1[-1] < o1[-1])
+        pulled = (c1[-2] < o1[-2]) if is_up else (c1[-2] > o1[-2])
+        if resumed and pulled:
+            score += 2; reasons.append("откат закончился, цена пошла по тренду")
+        elif resumed:
+            score += 1; reasons.append("свеча идёт по тренду")
+
+        # 2. RSI откатил к середине и поворачивает по тренду — 1
+        if is_up and 40 <= rsi1 <= 60 and rsi1 > rsi_prev:
+            score += 1; reasons.append(f"RSI откатил и растёт ({rsi1:.0f})")
+        if (not is_up) and 40 <= rsi1 <= 60 and rsi1 < rsi_prev:
+            score += 1; reasons.append(f"RSI откатил и падает ({rsi1:.0f})")
+
+        # 3. Stochastic поворачивает по тренду из зоны отката — 1
+        if is_up and k_prev <= d_prev and k_now > d_now and k_now < 60:
+            score += 1; reasons.append(f"Stochastic повернул вверх ({k_now:.0f})")
+        if (not is_up) and k_prev >= d_prev and k_now < d_now and k_now > 40:
+            score += 1; reasons.append(f"Stochastic повернул вниз ({k_now:.0f})")
+
+        # 4. Цена на правильной стороне EMA9(1м) — тренд цел — 1
+        if (is_up and price > ema_fast1) or ((not is_up) and price < ema_fast1):
+            score += 1; reasons.append("цена держит сторону EMA9")
+
+        # 5. Сильный тренд (ADX) — продолжение надёжнее — 1
+        if adx_val >= config.ADX_STRONG:
+            score += 1; reasons.append(f"сильный тренд (ADX {adx_val:.0f})")
+
+        # 6. Объём по тренду — 1 (крипта)
+        if has_vol and vol_spike() >= config.VOLUME_SPIKE and resumed:
+            score += 1; reasons.append(f"всплеск объёма x{vol_spike():.1f}")
 
     # Живая (ещё не закрытая) свеча идёт против сетапа?
     # Если да — разворот не подтверждён, ждём её закрытия и заходим
@@ -326,6 +355,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
         "reasons": reasons,
         "price": price,
         "rsi": rsi1,
+        "regime": regime,
         "wait_extra": wait_extra,
     }
 
