@@ -195,12 +195,22 @@ def adx(highs, lows, closes, period=14):
 # ---------- Оценка сетапа (общая для крипты и валюты) ----------
 
 def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
-    """Балльная оценка. v1=None для валюты (нет объёма, максимум 6 баллов)."""
-    if len(c1) < 40 or len(c5) < 40:
+    """Балльная оценка по ЗАКРЫТЫМ свечам (без перерисовки).
+    v1=None для валюты (нет объёма, максимум 6 баллов)."""
+    if len(c1) < 41 or len(c5) < 41:
         return None
 
     if min_atr_pct is None:
         min_atr_pct = config.MIN_ATR_PCT
+
+    # Последняя свеча в данных ещё формируется. Сигнал считаем ТОЛЬКО по
+    # закрытым свечам — иначе «перерисовка»: то, что видим в середине минуты,
+    # к её закрытию часто исчезает, и сделка уходит в минус.
+    live_o, live_c = o1[-1], c1[-1]
+    o1, h1, l1, c1 = o1[:-1], h1[:-1], l1[:-1], c1[:-1]
+    if v1 is not None:
+        v1 = v1[:-1]
+    c5 = c5[:-1]
 
     price = c1[-1]
     a = atr(h1, l1, 14)
@@ -340,7 +350,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     # Если да — разворот не подтверждён, ждём её закрытия и заходим
     # на следующей минуте (вход переносится на +1 мин).
     wait_extra = False
-    live_body = c1[-1] - o1[-1]
+    live_body = live_c - live_o
     threshold = a * config.WAIT_EXTRA_ATR
     if direction == "UP" and live_body < -threshold:
         wait_extra = True
