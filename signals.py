@@ -357,6 +357,16 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     elif direction == "DOWN" and live_body > threshold:
         wait_extra = True
 
+    # Экспирация под характер сетапа:
+    #  откат — быстрый отскок, держим коротко (1 мин)
+    #  тренд — даём движению время; чем сильнее тренд, тем дольше
+    if regime == "откат":
+        expiry = config.EXPIRY_MIN
+    elif adx_val >= config.ADX_STRONG:
+        expiry = config.EXPIRY_MAX
+    else:
+        expiry = min(config.EXPIRY_MIN + 1, config.EXPIRY_MAX)
+
     return {
         "name": name,
         "direction": direction,
@@ -367,6 +377,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
         "rsi": rsi1,
         "regime": regime,
         "wait_extra": wait_extra,
+        "expiry": expiry,
     }
 
 
@@ -463,20 +474,38 @@ def scan_forex():
 
 # ---------- Общее сканирование: крипта + валюта, одна лучшая ----------
 
+def _ratio(r):
+    return r["score"] / r["max_score"]
+
+
+def _pick(candidates):
+    """Из набора (результат, порог) выбирает лучший прошедший порог И
+    разрешённый калибровкой. Возвращает (лучший, ближайший_кандидат)."""
+    import tracker
+
+    passed = [
+        r for r, thr in candidates
+        if r["score"] >= thr and tracker.allowed(r.get("regime", "?"), r["name"])
+    ]
+    if passed:
+        return max(passed, key=_ratio), None
+    allcand = [r for r, _ in candidates]
+    if allcand:
+        return None, max(allcand, key=_ratio)
+    return None, None
+
+
 def scan_best():
     """Главный скан. Сначала котировки самого Покета (обычные + OTC,
     выплата проверена). Если связи с Покетом нет — запасные источники
-    (Binance + Deriv). Возвращает (лучший, ближайший_кандидат)."""
+    (Binance + Deriv). Калибровка сама отсекает просевшие тактики/пары.
+    Возвращает (лучший, ближайший_кандидат)."""
     import pocket
 
     try:
-        po_best, po_all, ok = pocket.scan_po()
+        _, po_all, ok = pocket.scan_po()
         if ok:
-            if po_best:
-                return po_best, None
-            if po_all:
-                return None, max(po_all, key=lambda r: r["score"] / r["max_score"])
-            return None, None
+            return _pick([(r, config.MIN_SCORE_FOREX) for r in po_all])
     except Exception:
         pass
 
@@ -484,21 +513,13 @@ def scan_best():
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         f_crypto = pool.submit(scan_all)
         f_forex = pool.submit(scan_forex)
-        crypto_best, crypto_all = f_crypto.result()
-        forex_best, forex_all, _ = f_forex.result()
+        _, crypto_all = f_crypto.result()
+        _, forex_all, _ = f_forex.result()
 
-    def ratio(r):
-        return r["score"] / r["max_score"]
-
-    # Помечаем: это запасные котировки (Binance/Deriv), не сам Покет
     for r in crypto_all + forex_all:
         r["backup"] = True
 
-    passed = [r for r in (crypto_best, forex_best) if r]
-    if passed:
-        return max(passed, key=ratio), None
-
-    candidates = crypto_all + forex_all
-    if candidates:
-        return None, max(candidates, key=ratio)
-    return None, None
+    return _pick(
+        [(r, config.MIN_SCORE) for r in crypto_all]
+        + [(r, config.MIN_SCORE_FOREX) for r in forex_all]
+    )

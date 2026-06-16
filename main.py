@@ -92,7 +92,8 @@ WELCOME = (
     "🎯 <b>Дай сетап сейчас</b> — разовый сигнал по кнопке.\n\n"
     "Под каждым сигналом жми <b>✅ Я зашёл</b> — бот сам проверит "
     "результат и посчитает твой винрейт. 📊\n\n"
-    "⚡ Вход на новой минуте, экспирация <b>1 минута</b>.\n"
+    "⚡ Вход на новой минуте. Экспирацию (1-3 мин) бот подбирает сам "
+    "под характер сетапа.\n"
     "⚠️ Только пары с выплатой <b>+85%</b>."
 )
 
@@ -104,7 +105,8 @@ HOWTO = (
     "1️⃣ Открой пару в Pocket Option\n"
     "2️⃣ Проверь выплату (+85%) и пометку OTC\n"
     "3️⃣ Дождись новой минуты и ставь в нужную сторону\n"
-    "4️⃣ Жми <b>✅ Я зашёл</b> — бот проверит результат сам\n\n"
+    "4️⃣ Поставь экспирацию, которую указал бот (1-3 мин)\n"
+    "5️⃣ Жми <b>✅ Я зашёл</b> — бот проверит результат сам\n\n"
     "<b>Статистика:</b> 📊 — победы/минусы и винрейт, "
     "в т.ч. отдельно по тактикам (откат / тренд).\n\n"
     "❗ Не ставь больше 2-3% депозита на сделку.\n"
@@ -124,11 +126,12 @@ def format_setup(best):
     if best.get("wait_extra"):
         sec_left += 60
 
+    exp = best.get("expiry", config.EXPIRY_MINUTES)
     text = f"🎯 <b>СЕТАП: {best['name']}</b>\n\n"
     text += f"<b>Ставка: {word}</b>\n"
     if best.get("regime"):
         text += f"📊 Тактика: <b>{best['regime']}</b>\n"
-    text += f"⏱ Экспирация: <b>{config.EXPIRY_MINUTES} минута</b>\n"
+    text += f"⏱ Экспирация: <b>{exp} мин</b>\n"
     text += f"💪 Сила: <b>{best['score']}/{best['max_score']}</b>\n"
     if best.get("payout"):
         text += f"💰 Выплата: <b>+{best['payout']}%</b> (проверено)\n"
@@ -232,13 +235,14 @@ def handle_took(chat_id, token):
             build_keyboard(chat_id),
         )
         return
-    expiry = time.time() + config.EXPIRY_MINUTES * 60
+    exp = signal.get("expiry", config.EXPIRY_MINUTES)
+    expiry = time.time() + exp * 60
     tracker.add_trade(chat_id, signal, price, expiry)
     d = "ВВЕРХ" if signal["direction"] == "UP" else "ВНИЗ"
     send_message(
         chat_id,
         f"✅ Записал: <b>{signal['name']} {d}</b>, цена входа {price:g}.\n"
-        f"Проверю результат через {config.EXPIRY_MINUTES} мин и напишу. 📊",
+        f"Проверю результат через {exp} мин и напишу. 📊",
     )
 
 
@@ -268,6 +272,15 @@ def handle_stats(chat_id):
             dec = v["win"] + v["loss"]
             w = (100.0 * v["win"] / dec) if dec else 0.0
             text += f"• {rg}: {v['win']}/{dec} ({w:.0f}%)\n"
+
+    disabled = tracker.disabled_buckets()
+    if disabled:
+        text += "\n🚫 Авто-отключено (просело ниже безубытка):\n"
+        for key, wr, n in disabled:
+            kind, name = key.split(":", 1)
+            label = "тактика" if kind == "regime" else "пара"
+            text += f"• {label} {name}: {wr*100:.0f}% за {n}\n"
+        text += "\nСброс калибровки: /reset"
     send_message(chat_id, text, build_keyboard(chat_id))
 
 
@@ -333,6 +346,13 @@ def process_update(upd):
             send_message(chat_id, WELCOME, build_keyboard(chat_id))
         elif text.startswith("/stats"):
             handle_stats(chat_id)
+        elif text.startswith("/reset"):
+            tracker.reset_calibration()
+            send_message(
+                chat_id,
+                "♻️ Калибровка сброшена. Бот снова пробует все тактики и пары.",
+                build_keyboard(chat_id),
+            )
         elif text:
             send_message(chat_id, "Жми кнопку 👇", build_keyboard(chat_id))
 
@@ -398,6 +418,11 @@ def resolver_loop():
                     result = "loss"
 
                 tracker.record(t["chat"], result, t.get("regime", "?"))
+                # калибровка: победа/минус (ничьи не учитываем)
+                if result != "tie":
+                    tracker.record_outcome(
+                        t.get("regime", "?"), t["name"], result == "win"
+                    )
                 tracker.remove_trade(t["id"])
 
                 d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"

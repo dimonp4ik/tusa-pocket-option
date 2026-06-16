@@ -6,7 +6,10 @@
 
 import os
 import json
+import random
 import threading
+
+import config
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "tusa_data.json")
 
@@ -16,6 +19,7 @@ _state = {
     "open": [],       # открытые сделки (ждут результата)
     "stats": {},      # chat_id(str) -> статистика
     "seq": 0,         # счётчик id сделок
+    "cal": {},        # калибровка: bucket -> список последних исходов (1/0)
 }
 
 
@@ -28,6 +32,7 @@ def load():
         _state["open"] = data.get("open", [])
         _state["stats"] = data.get("stats", {})
         _state["seq"] = data.get("seq", 0)
+        _state["cal"] = data.get("cal", {})
     except Exception:
         pass
 
@@ -109,3 +114,56 @@ def record(chat_id, result, regime):
 
 def get_stats(chat_id):
     return _state["stats"].get(str(int(chat_id)))
+
+
+# ---------- Само-калибровка (глобально по всем юзерам) ----------
+
+def _bucket_wr(key):
+    """Винрейт по корзине: (доля побед, число сделок) за окно."""
+    ring = _state["cal"].get(key, [])
+    n = len(ring)
+    if n == 0:
+        return None, 0
+    return sum(ring) / n, n
+
+
+def record_outcome(regime, pair_name, win):
+    """Пишет исход (победа/минус, без ничьих) в корзины тактики и пары."""
+    with _lock:
+        for key in (f"regime:{regime}", f"pair:{pair_name}"):
+            ring = _state["cal"].setdefault(key, [])
+            ring.append(1 if win else 0)
+            # держим только последние CAL_WINDOW
+            if len(ring) > config.CAL_WINDOW:
+                del ring[:-config.CAL_WINDOW]
+        _save()
+
+
+def allowed(regime, pair_name):
+    """False, если тактика ИЛИ пара просели ниже безубытка (с запасом
+    на «пробу» — иногда пропускаем, чтобы обновить статистику)."""
+    for key in (f"regime:{regime}", f"pair:{pair_name}"):
+        wr, n = _bucket_wr(key)
+        if wr is not None and n >= config.CAL_MIN_SAMPLE and wr < config.CAL_BREAKEVEN:
+            if random.random() < config.CAL_PROBE_PROB:
+                continue  # редкая проба — пропускаем
+            return False
+    return True
+
+
+def disabled_buckets():
+    """Список отключённых корзин для показа в статистике."""
+    out = []
+    for key, ring in _state["cal"].items():
+        n = len(ring)
+        if n >= config.CAL_MIN_SAMPLE:
+            wr = sum(ring) / n
+            if wr < config.CAL_BREAKEVEN:
+                out.append((key, wr, n))
+    return out
+
+
+def reset_calibration():
+    with _lock:
+        _state["cal"] = {}
+        _save()
