@@ -375,7 +375,26 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
 def analyze_crypto(symbol):
     o1, h1, l1, c1, v1 = fetch_binance(symbol, "1m", 60)
     o5, h5, l5, c5, v5 = fetch_binance(symbol, "5m", 60)
-    return score_setup(config.PAIRS.get(symbol, symbol), o1, h1, l1, c1, v1, c5)
+    res = score_setup(config.PAIRS.get(symbol, symbol), o1, h1, l1, c1, v1, c5)
+    if res:
+        res["symbol"] = symbol
+        res["source"] = "binance"
+    return res
+
+
+def current_price(source, symbol):
+    """Текущая (последняя) цена пары для проверки результата сделки."""
+    if source == "binance":
+        _, _, _, c, _ = fetch_binance(symbol, "1m", 3)
+        return c[-1]
+    if source == "deriv":
+        ws = create_connection(DERIV_URL, timeout=15)
+        try:
+            _, _, _, c, _ = _deriv_request(ws, symbol, 60, 3)
+            return c[-1]
+        finally:
+            ws.close()
+    return None
 
 
 def scan_all():
@@ -424,6 +443,8 @@ def scan_forex():
                     min_atr_pct=config.MIN_ATR_PCT_FOREX,
                 )
                 if res:
+                    res["symbol"] = symbol
+                    res["source"] = "deriv"
                     results.append(res)
             except Exception:
                 continue

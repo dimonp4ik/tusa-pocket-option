@@ -81,6 +81,23 @@ def _is_pair(asset):
     return len(base) == 6 and base.isalpha() and base.isupper()
 
 
+def current_price(symbol):
+    """Текущая цена пары Покета для проверки результата сделки."""
+    if not enabled():
+        return None
+    with _lock:
+        try:
+            client = _get_client()
+            c = client.history(symbol, 60)
+            if not c:
+                return None
+            _, _, _, cl, _ = _to_arrays(c)
+            return cl[-1]
+        except Exception:
+            _reset_client()
+            return None
+
+
 def scan_po():
     """Сканирует все пары Покета (обычные + OTC) с выплатой >= MIN_PAYOUT.
     Возвращает (best, all, ok). ok=False — связи с Покетом нет,
@@ -131,6 +148,8 @@ def scan_po():
                 if res:
                     res["payout"] = payout
                     res["otc"] = asset.endswith("_otc")
+                    res["symbol"] = asset
+                    res["source"] = "po"
                     results.append(res)
             except Exception:
                 continue
