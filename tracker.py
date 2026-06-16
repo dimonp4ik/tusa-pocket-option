@@ -67,7 +67,9 @@ def active_users():
 
 # ---------- Открытые сделки ----------
 
-def add_trade(chat_id, signal, entry_price, expiry_epoch):
+def add_trade(chat_id, signal, start_epoch, exp_minutes):
+    """Заводит сделку, которая «оживёт» (зафиксирует цену входа) на
+    открытии новой свечи в момент start_epoch, и истечёт через exp_minutes."""
     with _lock:
         _state["seq"] += 1
         tid = _state["seq"]
@@ -79,16 +81,33 @@ def add_trade(chat_id, signal, entry_price, expiry_epoch):
             "source": signal.get("source"),
             "direction": signal["direction"],
             "regime": signal.get("regime", "?"),
-            "entry": entry_price,
-            "expiry": expiry_epoch,
+            "entry": None,                       # фиксируется на старте свечи
+            "start": start_epoch,                # когда начинать отсчёт
+            "expiry": start_epoch + exp_minutes * 60,
         })
         _save()
         return tid
 
 
+def pending_starts(now_epoch):
+    """Сделки, которым пора зафиксировать цену входа (свеча открылась)."""
+    return [t for t in _state["open"]
+            if t["entry"] is None and t["start"] <= now_epoch]
+
+
+def set_entry(tid, price):
+    with _lock:
+        for t in _state["open"]:
+            if t["id"] == tid:
+                t["entry"] = price
+                break
+        _save()
+
+
 def due_trades(now_epoch):
-    """Сделки, у которых истекла экспирация — пора проверять результат."""
-    return [t for t in _state["open"] if t["expiry"] <= now_epoch]
+    """Сделки с зафиксированным входом, у которых истекла экспирация."""
+    return [t for t in _state["open"]
+            if t["entry"] is not None and t["expiry"] <= now_epoch]
 
 
 def remove_trade(tid):

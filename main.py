@@ -231,22 +231,18 @@ def handle_took(chat_id, token):
             build_keyboard(chat_id),
         )
         return
-    price = price_for(signal.get("source"), signal.get("symbol"))
-    if price is None:
-        send_message(
-            chat_id,
-            "⚠️ Не смог зафиксировать цену входа. Попробуй на следующем сетапе.",
-            build_keyboard(chat_id),
-        )
-        return
     exp = signal.get("expiry", config.EXPIRY_MINUTES)
-    expiry = time.time() + exp * 60
-    tracker.add_trade(chat_id, signal, price, expiry)
+    # Отсчёт начинаем с открытия следующей минуты (когда реально входишь)
+    now = time.time()
+    start = (int(now // 60) + 1) * 60
+    tracker.add_trade(chat_id, signal, start, exp)
     d = "ВВЕРХ" if signal["direction"] == "UP" else "ВНИЗ"
+    sec = int(start - now)
     send_message(
         chat_id,
-        f"✅ Записал: <b>{signal['name']} {d}</b>, цена входа {price:g}.\n"
-        f"Проверю результат через {exp} мин и напишу. 📊",
+        f"✅ Записал: <b>{signal['name']} {d}</b>, экспирация {exp} мин.\n"
+        f"⏱ Отсчёт начну с открытия новой минуты (через {sec} сек) — "
+        "зафиксирую цену входа и проверю результат. 📊",
     )
 
 
@@ -401,10 +397,27 @@ def scanner_loop():
 
 
 def resolver_loop():
-    """Проверяет открытые сделки: цена на выходе vs вход -> победа/минус."""
+    """Фиксирует цену входа на открытии свечи, затем проверяет результат."""
     while True:
         try:
             now = time.time()
+
+            # 1) Свеча открылась — фиксируем цену входа
+            for t in tracker.pending_starts(now):
+                price = price_for(t.get("source"), t.get("symbol"))
+                if price is None:
+                    if now - t["start"] > 120:
+                        tracker.remove_trade(t["id"])  # данные не дались
+                    continue
+                tracker.set_entry(t["id"], price)
+                d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"
+                send_message(
+                    t["chat"],
+                    f"⏱ Вход зафиксирован: <b>{t['name']} {d}</b> по {price:g}. "
+                    "Жду экспирацию…",
+                )
+
+            # 2) Экспирация истекла — считаем результат
             for t in tracker.due_trades(now):
                 exit_price = price_for(t.get("source"), t.get("symbol"))
                 if exit_price is None:
