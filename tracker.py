@@ -18,11 +18,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 _lock = threading.Lock()
 _state = {
-    "active": [],     # chat_id, кому слать авто-сигналы
-    "open": [],       # открытые сделки (ждут результата)
-    "stats": {},      # chat_id(str) -> статистика
-    "seq": 0,         # счётчик id сделок
-    "cal": {},        # калибровка: bucket -> список последних исходов (1/0)
+    "active": [],           # chat_id, кому слать авто-сигналы
+    "open": [],             # открытые сделки (ждут результата)
+    "stats": {},            # chat_id(str) -> статистика
+    "seq": 0,               # счётчик id сделок
+    "cal": {},              # калибровка: bucket -> список последних исходов (1/0)
+    "recent_results": [],   # последние N исходов (1=win, 0=loss) для streak
 }
 
 _conn = None
@@ -82,6 +83,7 @@ def load():
                 _state["stats"] = data.get("stats", {})
                 _state["seq"] = data.get("seq", 0)
                 _state["cal"] = data.get("cal", {})
+                _state["recent_results"] = data.get("recent_results", [])
             return
         except Exception:
             traceback.print_exc()
@@ -94,6 +96,7 @@ def load():
         _state["stats"] = data.get("stats", {})
         _state["seq"] = data.get("seq", 0)
         _state["cal"] = data.get("cal", {})
+        _state["recent_results"] = data.get("recent_results", [])
     except Exception:
         pass
 
@@ -206,11 +209,29 @@ def record(chat_id, result, regime):
         s[result] = s.get(result, 0) + 1
         rg = s["regimes"].setdefault(regime, {"win": 0, "loss": 0, "tie": 0})
         rg[result] = rg.get(result, 0) + 1
+        # streak tracking (только win/loss, ничьи пропускаем)
+        if result in ("win", "loss"):
+            recent = _state.setdefault("recent_results", [])
+            recent.append(1 if result == "win" else 0)
+            if len(recent) > 20:
+                del recent[:-20]
         _save()
 
 
 def get_stats(chat_id):
     return _state["stats"].get(str(int(chat_id)))
+
+
+def get_streak():
+    """Текущая серия минусов подряд (по подтверждённым юзером сделкам)."""
+    recent = _state.get("recent_results", [])
+    streak = 0
+    for r in reversed(recent):
+        if r == 0:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 # ---------- Само-калибровка (глобально по всем юзерам) ----------

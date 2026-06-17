@@ -216,6 +216,15 @@ def price_for(source, symbol):
 # ---------- Обработчики кнопок ----------
 
 def handle_scan(chat_id):
+    # Предупреждение при серии минусов (не блокируем, юзер решает сам)
+    streak = tracker.get_streak()
+    if streak >= 3:
+        send_message(
+            chat_id,
+            f"⚠️ <b>Стоп-сигнал:</b> {streak} минуса подряд.\n"
+            "Рынок сейчас против нас — авто-поиск на паузе. "
+            "Сканирую по твоей просьбе, но будь осторожен.",
+        )
     try:
         best, candidate = signals.scan_best()
         if best:
@@ -394,10 +403,18 @@ def scanner_loop():
         try:
             now = datetime.now(timezone.utc)
             users = tracker.active_users()
-            # Триггер раз в минуту, начиная с заданной секунды
             if (users and now.minute != last_minute
                     and now.second >= config.AUTO_SCAN_AT_SECOND):
                 last_minute = now.minute
+
+                # Session filter: 00-05 UTC — мёртвые часы, OTC хаотичен
+                if now.hour < 6:
+                    continue
+
+                # Streak breaker: 3 минуса подряд → пауза авто-скана
+                if tracker.get_streak() >= 3:
+                    continue
+
                 best, _ = signals.scan_best()
                 if best:
                     key = best["name"] + best["direction"]

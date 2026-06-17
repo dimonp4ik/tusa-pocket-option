@@ -256,7 +256,7 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
     lower_wick = min(c1[-1], o1[-1]) - l1[-1]
     upper_wick = h1[-1] - max(c1[-1], o1[-1])
     has_vol = v1 is not None
-    max_score = 7 if has_vol else 6
+    max_score = 8 if has_vol else 7  # +1 за подтверждение тела свечи (откат режим)
 
     def vol_spike():
         if not has_vol:
@@ -309,6 +309,14 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
                 up += 1; up_r.append(f"всплеск объёма x{vol_spike():.1f}")
             else:
                 down += 1; down_r.append(f"всплеск объёма x{vol_spike():.1f}")
+
+        # Тело свечи подтверждает отскок: последняя закрытая свеча идёт ПО сигналу.
+        # Убирает «падающие ножи»: если RSI oversold, но свеча всё ещё падает — доверие ниже.
+        last_body = c1[-1] - o1[-1]
+        if last_body > 0:
+            up += 1; up_r.append("свеча подтвердила отскок вверх")
+        elif last_body < 0:
+            down += 1; down_r.append("свеча подтвердила отскок вниз")
 
         if up >= down:
             direction, score, reasons = "UP", up, up_r
