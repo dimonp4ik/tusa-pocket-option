@@ -157,6 +157,17 @@ def stochastic(highs, lows, closes, k_period, smooth, d_period):
     return k[-1], k[-2], d[-1], d[-2]
 
 
+def eff_ratio(closes, period):
+    """Efficiency Ratio: |net move| / sum(|step moves|) за period баров.
+    1.0 = чистый тренд (всё в одну сторону), 0.0 = чистый боковик.
+    Возвращает 1.0 если данных мало (не фильтруем при недостатке истории)."""
+    if len(closes) < period + 1:
+        return 1.0
+    net = abs(closes[-1] - closes[-(period + 1)])
+    path = sum(abs(closes[i] - closes[i - 1]) for i in range(-period, 0))
+    return net / path if path > 0 else 1.0
+
+
 def adx(highs, lows, closes, period=14):
     """ADX по Уайлдеру: сила тренда (0-100)."""
     trs, pdms, ndms = [], [], []
@@ -306,6 +317,10 @@ def score_setup(name, o1, h1, l1, c1, v1, c5, min_atr_pct=None):
 
     else:
         # ----- ТРЕНД: тактика ПРОДОЛЖЕНИЯ (входим ПО тренду на откате) -----
+        # Фильтр направленности: хаотичный тренд (ER < MIN_EFF_RATIO) = ложные пробои
+        er = eff_ratio(c1, config.EFF_RATIO_LOOKBACK)
+        if er < config.MIN_EFF_RATIO:
+            return None
         regime = "тренд"
         is_up = ema_fast5 > ema_slow5
         direction = "UP" if is_up else "DOWN"

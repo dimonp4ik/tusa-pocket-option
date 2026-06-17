@@ -141,9 +141,11 @@ def active_users():
 
 # ---------- Открытые сделки ----------
 
-def add_trade(chat_id, signal, start_epoch, exp_minutes):
-    """Заводит сделку, которая «оживёт» (зафиксирует цену входа) на
-    открытии новой свечи в момент start_epoch, и истечёт через exp_minutes."""
+def add_trade(chat_id, signal, start_epoch, exp_minutes, silent=False):
+    """Заводит сделку.
+    silent=True — «теневая»: фиксирует результат для калибровки, не пишет юзеру.
+    Теневые сделки (chat_id=0) создаются автоматически при каждом сетапе
+    для всех экспираций — чтобы бот учился без нажатия «✅ Я зашёл»."""
     with _lock:
         _state["seq"] += 1
         tid = _state["seq"]
@@ -156,8 +158,10 @@ def add_trade(chat_id, signal, start_epoch, exp_minutes):
             "direction": signal["direction"],
             "regime": signal.get("regime", "?"),
             "entry": None,                       # фиксируется на старте свечи
-            "start": start_epoch,                # когда начинать отсчёт
+            "start": start_epoch,
             "expiry": start_epoch + exp_minutes * 60,
+            "exp_min": exp_minutes,              # для калибровки экспирации
+            "silent": silent,                    # не писать юзеру
         })
         _save()
         return tid
@@ -193,7 +197,7 @@ def remove_trade(tid):
 # ---------- Статистика ----------
 
 def record(chat_id, result, regime):
-    """result: 'win' | 'loss' | 'tie'."""
+    """result: 'win' | 'loss' | 'tie'. Только для пользовательских сделок."""
     with _lock:
         key = str(int(chat_id))
         s = _state["stats"].setdefault(
@@ -220,34 +224,59 @@ def _bucket_wr(key):
     return sum(ring) / n, n
 
 
-def record_outcome(regime, pair_name, win):
-    """Пишет исход (победа/минус, без ничьих) в корзины тактики и пары."""
+def record_outcome(regime, pair_name, win, expiry_min=None):
+    """Пишет исход в корзины тактики, пары и (опционально) экспирации.
+    Вызывается и для пользовательских, и для теневых сделок.
+    expiry_min — фактическая экспирация (мин), заполняет {regime}:{n} bucket."""
     with _lock:
         for key in (f"regime:{regime}", f"pair:{pair_name}"):
             ring = _state["cal"].setdefault(key, [])
             ring.append(1 if win else 0)
-            # держим только последние CAL_WINDOW
             if len(ring) > config.CAL_WINDOW:
                 del ring[:-config.CAL_WINDOW]
+        if expiry_min is not None:
+            # отдельные корзины per-expiry и per-regime+expiry
+            for key in (f"expiry:{expiry_min}", f"{regime}:{expiry_min}"):
+                ring = _state["cal"].setdefault(key, [])
+                ring.append(1 if win else 0)
+                if len(ring) > config.CAL_WINDOW:
+                    del ring[:-config.CAL_WINDOW]
         _save()
 
 
 def allowed(regime, pair_name):
-    """False, если тактика ИЛИ пара просели ниже безубытка (с запасом
-    на «пробу» — иногда пропускаем, чтобы обновить статистику)."""
+    """False, если тактика ИЛИ пара просели ниже безубытка."""
     for key in (f"regime:{regime}", f"pair:{pair_name}"):
         wr, n = _bucket_wr(key)
         if wr is not None and n >= config.CAL_MIN_SAMPLE and wr < config.CAL_BREAKEVEN:
             if random.random() < config.CAL_PROBE_PROB:
-                continue  # редкая проба — пропускаем
+                continue  # редкая проба
             return False
     return True
 
 
+def best_expiry(regime, default_exp):
+    """Возвращает оптимальную экспирацию (1-3 мин) по накопленным данным.
+    Нужно минимум 2 варианта с данными (CAL_MIN_SAMPLE каждый) для сравнения.
+    Пока данных мало — возвращает default_exp (текущая логика без изменений)."""
+    options = []
+    for exp in range(config.EXPIRY_MIN, config.EXPIRY_MAX + 1):
+        wr, n = _bucket_wr(f"{regime}:{exp}")
+        if n >= config.CAL_MIN_SAMPLE:
+            options.append((wr, exp))
+    if len(options) < 2:
+        return default_exp
+    _, best = max(options, key=lambda x: x[0])
+    return best
+
+
 def disabled_buckets():
-    """Список отключённых корзин для показа в статистике."""
+    """Список отключённых корзин для показа в статистике.
+    Показывает только режимы и пары (не expiry — они внутренние)."""
     out = []
     for key, ring in _state["cal"].items():
+        if not (key.startswith("regime:") or key.startswith("pair:")):
+            continue
         n = len(ring)
         if n >= config.CAL_MIN_SAMPLE:
             wr = sum(ring) / n

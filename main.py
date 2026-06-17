@@ -184,8 +184,21 @@ def register_signal(signal):
 
 
 def send_setup(chat_id, best):
+    # Применяем откалиброванную экспирацию (если накоплено достаточно данных)
+    best = dict(best)
+    best["expiry"] = tracker.best_expiry(best.get("regime", "откат"), best["expiry"])
+
     token = register_signal(best)
     send_message(chat_id, format_setup(best), signal_keyboard(token))
+
+    # Shadow trades: авто-измеряем исход на всех экспирациях без кнопки юзера.
+    # Заполняют калибровку для best_expiry(), не пишут юзеру ничего.
+    now = time.time()
+    start = (int(now // 60) + 1) * 60
+    if best.get("wait_extra"):
+        start += 60
+    for exp in range(config.EXPIRY_MIN, config.EXPIRY_MAX + 1):
+        tracker.add_trade(0, best, start, exp, silent=True)
 
 
 # ---------- Цена для проверки результата ----------
@@ -408,21 +421,21 @@ def resolver_loop():
                 price = price_for(t.get("source"), t.get("symbol"))
                 if price is None:
                     if now - t["start"] > 120:
-                        tracker.remove_trade(t["id"])  # данные не дались
+                        tracker.remove_trade(t["id"])
                     continue
                 tracker.set_entry(t["id"], price)
-                d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"
-                send_message(
-                    t["chat"],
-                    f"⏱ Вход зафиксирован: <b>{t['name']} {d}</b> по {price:g}. "
-                    "Жду экспирацию…",
-                )
+                if not t.get("silent"):
+                    d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"
+                    send_message(
+                        t["chat"],
+                        f"⏱ Вход зафиксирован: <b>{t['name']} {d}</b> по {price:g}. "
+                        "Жду экспирацию…",
+                    )
 
             # 2) Экспирация истекла — считаем результат
             for t in tracker.due_trades(now):
                 exit_price = price_for(t.get("source"), t.get("symbol"))
                 if exit_price is None:
-                    # не смогли получить цену — попробуем позже, но не вечно
                     if now - t["expiry"] > 600:
                         tracker.remove_trade(t["id"])
                     continue
@@ -435,27 +448,32 @@ def resolver_loop():
                 else:
                     result = "loss"
 
-                tracker.record(t["chat"], result, t.get("regime", "?"))
-                # калибровка: победа/минус (ничьи не учитываем)
+                # Пользовательские сделки → личная статистика
+                if not t.get("silent"):
+                    tracker.record(t["chat"], result, t.get("regime", "?"))
+
+                # Все сделки (включая теневые) → глобальная калибровка
                 if result != "tie":
                     tracker.record_outcome(
-                        t.get("regime", "?"), t["name"], result == "win"
+                        t.get("regime", "?"), t["name"],
+                        result == "win", t.get("exp_min"),
                     )
                 tracker.remove_trade(t["id"])
 
-                d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"
-                if result == "win":
-                    head = "✅ <b>ПОБЕДА!</b>"
-                elif result == "loss":
-                    head = "❌ <b>Минус.</b>"
-                else:
-                    head = "➖ <b>Ничья</b> (цена не изменилась)."
-                send_message(
-                    t["chat"],
-                    f"{head}\n{t['name']} {d}\n"
-                    f"Вход: {entry:g} → Выход: {exit_price:g}",
-                    build_keyboard(t["chat"]),
-                )
+                if not t.get("silent"):
+                    d = "ВВЕРХ" if t["direction"] == "UP" else "ВНИЗ"
+                    if result == "win":
+                        head = "✅ <b>ПОБЕДА!</b>"
+                    elif result == "loss":
+                        head = "❌ <b>Минус.</b>"
+                    else:
+                        head = "➖ <b>Ничья</b> (цена не изменилась)."
+                    send_message(
+                        t["chat"],
+                        f"{head}\n{t['name']} {d}\n"
+                        f"Вход: {entry:g} → Выход: {exit_price:g}",
+                        build_keyboard(t["chat"]),
+                    )
         except Exception:
             traceback.print_exc()
         time.sleep(5)
