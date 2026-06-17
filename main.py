@@ -360,8 +360,9 @@ def process_update(upd):
 # ---------- Фоновые циклы ----------
 
 def keep_alive_loop():
-    """Пинг своего URL, чтобы Render не усыпил сервис."""
-    url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    """Пинг своего URL, чтобы сервис не засыпал."""
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    url = f"https://{domain}" if domain else os.environ.get("RENDER_EXTERNAL_URL", "")
     if not url:
         return
     while True:

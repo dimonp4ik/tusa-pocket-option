@@ -1,17 +1,20 @@
 # ============================================================
 # TUSA TRADE — трекинг сделок и статистика
 # Хранит активных юзеров (авто-поиск), открытые сделки и winrate.
-# Сохраняется в файл (переживает рестарт, но сбрасывается на новом деплое).
+# Основное хранилище: PostgreSQL (Railway DATABASE_URL).
+# Fallback: tusa_data.json (локальная разработка).
 # ============================================================
 
 import os
 import json
 import random
 import threading
+import traceback
 
 import config
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "tusa_data.json")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 _lock = threading.Lock()
 _state = {
@@ -22,9 +25,67 @@ _state = {
     "cal": {},        # калибровка: bucket -> список последних исходов (1/0)
 }
 
+_conn = None
+
+
+def _get_conn():
+    global _conn
+    if not DATABASE_URL:
+        return None
+    if _conn is not None:
+        try:
+            with _conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return _conn
+        except Exception:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+    try:
+        import psycopg2
+        _conn = psycopg2.connect(DATABASE_URL, sslmode="prefer")
+        _conn.autocommit = True
+        return _conn
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _init_db(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tusa_state (
+                    id INTEGER PRIMARY KEY,
+                    data TEXT NOT NULL
+                )
+            """)
+    except Exception:
+        traceback.print_exc()
+
 
 def load():
     global _state
+    conn = _get_conn()
+    if conn:
+        try:
+            _init_db(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM tusa_state WHERE id = 1")
+                row = cur.fetchone()
+            if row:
+                data = json.loads(row[0])
+                _state["active"] = data.get("active", [])
+                _state["open"] = data.get("open", [])
+                _state["stats"] = data.get("stats", {})
+                _state["seq"] = data.get("seq", 0)
+                _state["cal"] = data.get("cal", {})
+            return
+        except Exception:
+            traceback.print_exc()
+    # JSON fallback (локальная разработка)
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -38,9 +99,22 @@ def load():
 
 
 def _save():
+    data = json.dumps(_state, ensure_ascii=False)
+    conn = _get_conn()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tusa_state (id, data) VALUES (1, %s)
+                    ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data
+                """, (data,))
+            return
+        except Exception:
+            traceback.print_exc()
+    # JSON fallback
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(_state, f, ensure_ascii=False)
+            f.write(data)
     except Exception:
         pass
 
